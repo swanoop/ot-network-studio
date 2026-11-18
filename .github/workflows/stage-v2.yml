@@ -1,0 +1,48 @@
+name: Stage OT Network Studio v2 candidate
+on:
+  push:
+    branches: ["release/otns-v2-20261118"]
+    paths: [".release/payload.b64"]
+permissions:
+  contents: write
+jobs:
+  stage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Unpack candidate
+        run: |
+          mkdir -p /tmp/otns-release
+          base64 --decode .release/payload.b64 | tar -xz -C /tmp/otns-release
+          cp -a /tmp/otns-release/ot-network-studio/. .
+          rm -rf .release
+          rm -f .github/workflows/stage-v2.yml
+      - name: Resolve and generate deterministic lockfile
+        run: npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+      - name: Clean dependency install
+        run: npm ci --no-audit --no-fund
+      - name: TypeScript unit tests
+        run: npm test
+      - name: Python CLI tests
+        run: npm run test:py
+      - name: Strict type checks
+        run: npm run typecheck
+      - name: Production build
+        run: npm run build
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Browser smoke tests
+        run: npm run test:e2e
+      - name: Commit validated release candidate and lockfile
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Release OT Network Studio v2.0.1 with validated security checks" || exit 0
+          git push origin HEAD:release/otns-v2-20261118
