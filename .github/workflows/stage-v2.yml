@@ -20,6 +20,7 @@ jobs:
         run: |
           mkdir -p /tmp/otns-release
           base64 --decode .release/payload.b64 | tar -xz -C /tmp/otns-release
+          find . -mindepth 1 -maxdepth 1 ! -name '.git' ! -name '.github' ! -name '.release' -exec rm -rf {} +
           cp -a /tmp/otns-release/ot-network-studio/. .
           rm -rf .release
           rm -f .github/workflows/stage-v2.yml
