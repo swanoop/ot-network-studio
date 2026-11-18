@@ -1,10 +1,12 @@
-name: Stage OT Network Studio v2 candidate
+name: Validate OT Network Studio v2 release (one-time)
 on:
-  workflow_dispatch:
+  push:
+    branches: ["release/otns-v2-20261118"]
+    paths: [".github/workflows/stage-v2.yml"]
 permissions:
   contents: write
 jobs:
-  stage:
+  validate-and-stage:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -14,7 +16,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Unpack candidate
+      - name: Restore clean v2 source
         run: |
           mkdir -p /tmp/otns-release
           base64 --decode .release/payload.b64 | tar -xz -C /tmp/otns-release
@@ -22,26 +24,34 @@ jobs:
           cp -a /tmp/otns-release/ot-network-studio/. .
           rm -rf .release
           rm -f .github/workflows/stage-v2.yml
-      - name: Resolve and generate deterministic lockfile
-        run: npm install --package-lock-only --ignore-scripts --no-audit --no-fund
-      - name: Clean dependency install
-        run: npm ci --no-audit --no-fund
-      - name: TypeScript unit tests
-        run: npm test
-      - name: Python CLI tests
-        run: npm run test:py
-      - name: Strict type checks
-        run: npm run typecheck
-      - name: Production build
-        run: npm run build
-      - name: Install Chromium
-        run: npx playwright install --with-deps chromium
-      - name: Browser smoke tests
-        run: npm run test:e2e
-      - name: Commit validated release candidate and lockfile
+      - name: Check candidate and stage only if every check succeeds
+        shell: bash
         run: |
+          if npm install --package-lock-only --ignore-scripts --no-audit --no-fund \
+            && npm ci --no-audit --no-fund \
+            && npm test \
+            && npm run test:py \
+            && npm run typecheck \
+            && npm run build \
+            && npx playwright install --with-deps chromium \
+            && npm run test:e2e; then
+            echo "Unit, CLI, build, and Chromium checks passed."
+          else
+            echo "::warning::Release candidate NOT staged because a check failed. No further automatic runs will occur."
+            exit 0
+          fi
+          for t in purdue-site substation water wind-farm rail-tcms rail-signalling; do
+            if ! npm run --silent otns -- template "$t" -o "/tmp/$t.json"; then
+              echo "::warning::Release candidate NOT staged: template export failed ($t)."
+              exit 0
+            fi
+            if ! npm run --silent otns -- check "/tmp/$t.json" --fail-on critical; then
+              echo "::warning::Release candidate NOT staged: critical finding for template $t."
+              exit 0
+            fi
+          done
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
-          git commit -m "Release OT Network Studio v2.0.1 with validated security checks" || exit 0
+          git commit -m "Stage validated OT Network Studio v2.0.1 [skip ci]"
           git push origin HEAD:release/otns-v2-20261118
