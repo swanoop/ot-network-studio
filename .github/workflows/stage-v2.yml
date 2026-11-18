@@ -1,8 +1,6 @@
 name: Stage OT Network Studio v2 candidate
 on:
-  push:
-    branches: ["release/otns-v2-20261118"]
-    paths: [".release/payload.b64"]
+  workflow_dispatch:
 permissions:
   contents: write
 jobs:
