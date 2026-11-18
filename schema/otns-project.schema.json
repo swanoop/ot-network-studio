@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/swanoop/ot-network-studio/schema/otns-project.schema.json",
+  "title": "OT Network Studio project (schema v2)",
+  "type": "object",
+  "required": ["schemaVersion", "name", "nodes", "edges"],
+  "properties": {
+    "schemaVersion": { "const": 2 },
+    "name": { "type": "string", "minLength": 1 },
+    "description": { "type": "string" },
+    "updatedAt": { "type": "string", "format": "date-time" },
+    "nodes": { "type": "array", "items": { "$ref": "#/$defs/node" } },
+    "edges": { "type": "array", "items": { "$ref": "#/$defs/edge" } }
+  },
+  "$defs": {
+    "securityLevel": { "enum": ["SL 1", "SL 2", "SL 3", "SL 4"] },
+    "position": {
+      "type": "object",
+      "required": ["x", "y"],
+      "properties": { "x": { "type": "number" }, "y": { "type": "number" } }
+    },
+    "node": {
+      "type": "object",
+      "required": ["id", "position", "data"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "type": { "enum": ["asset", "zone"] },
+        "position": { "$ref": "#/$defs/position" },
+        "zIndex": { "type": "number" },
+        "style": {
+          "type": "object",
+          "properties": { "width": { "type": "number" }, "height": { "type": "number" } }
+        },
+        "data": { "oneOf": [{ "$ref": "#/$defs/asset" }, { "$ref": "#/$defs/zone" }] }
+      }
+    },
+    "asset": {
+      "type": "object",
+      "required": ["kind", "title", "assetType", "category", "protocols", "criticality"],
+      "properties": {
+        "kind": { "const": "asset" },
+        "title": { "type": "string" },
+        "assetType": { "type": "string", "description": "Catalogue type, see docs/COMPONENTS.md" },
+        "category": { "enum": ["Network", "OT Control", "Safety / SIS", "Field / Process", "Rail", "Energy / Utilities", "Security", "Compute", "Enterprise"] },
+        "status": { "enum": ["online", "warning", "offline", "unknown"] },
+        "ip": { "type": "string", "description": "IPv4, optionally with prefix: 10.10.20.5/24" },
+        "vlan": { "type": "string" },
+        "mac": { "type": "string" },
+        "purdueLevel": { "type": "integer", "minimum": 0, "maximum": 5 },
+        "protocols": { "type": "array", "items": { "type": "string" } },
+        "vendor": { "type": "string" },
+        "model": { "type": "string" },
+        "firmware": { "type": "string" },
+        "slCapability": { "$ref": "#/$defs/securityLevel" },
+        "criticality": { "enum": ["low", "medium", "high", "critical"] },
+        "owner": { "type": "string" },
+        "notes": { "type": "string" }
+      }
+    },
+    "zone": {
+      "type": "object",
+      "required": ["kind", "title", "zoneType"],
+      "properties": {
+        "kind": { "const": "zone" },
+        "title": { "type": "string" },
+        "zoneType": { "enum": ["zone", "dmz", "safety", "external"] },
+        "securityLevelTarget": { "$ref": "#/$defs/securityLevel" },
+        "subnet": { "type": "string" },
+        "vlan": { "type": "string" },
+        "owner": { "type": "string" },
+        "notes": { "type": "string" }
+      }
+    },
+    "edge": {
+      "type": "object",
+      "required": ["id", "source", "target", "data"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "source": { "type": "string" },
+        "target": { "type": "string" },
+        "sourceHandle": { "type": ["string", "null"] },
+        "targetHandle": { "type": ["string", "null"] },
+        "type": { "type": "string" },
+        "data": {
+          "type": "object",
+          "required": ["kind", "protocols", "direction", "enabled"],
+          "properties": {
+            "kind": { "enum": ["flow", "link"] },
+            "protocols": { "type": "array", "items": { "type": "string" } },
+            "direction": { "enum": ["forward", "bidirectional"], "description": "forward = source initiates" },
+            "ports": { "type": "string", "description": "Override, e.g. tcp/5020" },
+            "via": { "type": "array", "items": { "type": "string" }, "description": "Ids of boundary devices the flow is routed through" },
+            "conduit": { "type": "string" },
+            "encrypted": { "type": "boolean" },
+            "authenticated": { "type": "boolean" },
+            "media": { "enum": ["copper", "fibre", "wireless", "serial", "backplane", "cellular"] },
+            "redundancy": { "enum": ["none", "PRP", "HSR", "MRP", "RSTP", "DLR", "LAG"] },
+            "enabled": { "type": "boolean" },
+            "notes": { "type": "string" }
+          }
+        }
+      }
+    }
+  }
+}

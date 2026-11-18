@@ -10,22 +10,37 @@ permissions:
 
 jobs:
   frontend:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
-      - run: npm install
-      - run: npm run build
+      - name: Install dependencies from committed lockfile
+        run: npm ci
+      - name: Unit tests (engine, rules, templates)
+        run: npm test
+      - name: Type-check app and CLI
+        run: npm run typecheck
+      - name: Production build
+        run: npm run build
+      - name: Install Chromium for browser tests
+        run: npx playwright install --with-deps chromium
+      - name: Browser smoke tests
+        run: npm run test:e2e
+      - name: Design checks on every reference template
+        run: |
+          for t in purdue-site substation water wind-farm rail-tcms rail-signalling; do
+            npm run --silent otns -- template "$t" -o "/tmp/$t.json"
+            npm run --silent otns -- check "/tmp/$t.json" --fail-on critical
+          done
 
   python-cli:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python -m py_compile tools/otns_cli.py
-      - run: python tools/otns_cli.py --help
+      - run: python -m unittest discover -s tools -v

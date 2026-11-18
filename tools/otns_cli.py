@@ -1,17 +1,31 @@
 #!/usr/bin/env python3
-"""Offline companion CLI for OT Network Studio project files.
+"""Lightweight, dependency-free companion CLI for OT Network Studio projects.
 
-Uses only the Python standard library.
+Reads schema v1 and v2 project files. For the full rule engine, firewall rule
+matrix and conduit register, use the Node CLI (`npm run otns -- check ...`),
+which shares its code with the web app.
+
+    python tools/otns_cli.py validate project.otns.json
+    python tools/otns_cli.py summary  project.otns.json
+    python tools/otns_cli.py report   project.otns.json --output report.md
+    python tools/otns_cli.py inventory project.otns.json --output inventory.csv
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
+import io
 import json
 import sys
 from collections import Counter
 from pathlib import Path
 from typing import Any
+
+ASSET_W, ASSET_H = 180, 96
+ZONE_W, ZONE_H = 520, 280
+EDGE_KINDS = {"flow", "link"}
+SL_VALUES = {"SL 1", "SL 2", "SL 3", "SL 4"}
 
 
 def load_project(path: Path) -> dict[str, Any]:
@@ -21,7 +35,6 @@ def load_project(path: Path) -> dict[str, Any]:
         raise ValueError(f"File not found: {path}") from exc
     except json.JSONDecodeError as exc:
         raise ValueError(f"Invalid JSON: {exc}") from exc
-
     if not isinstance(data, dict):
         raise ValueError("Project root must be a JSON object.")
     return data
@@ -29,194 +42,191 @@ def load_project(path: Path) -> dict[str, Any]:
 
 def validate_project(data: dict[str, Any]) -> list[str]:
     errors: list[str] = []
-
-    if data.get("schemaVersion") != 1:
-        errors.append("schemaVersion must be 1.")
-
+    version = data.get("schemaVersion")
+    if version not in (1, 2):
+        errors.append("schemaVersion must be 1 or 2.")
     if not isinstance(data.get("name"), str) or not data["name"].strip():
         errors.append("name must be a non-empty string.")
 
-    nodes = data.get("nodes")
-    edges = data.get("edges")
-
-    if not isinstance(nodes, list):
+    nodes = data.get("nodes") if isinstance(data.get("nodes"), list) else None
+    edges = data.get("edges") if isinstance(data.get("edges"), list) else None
+    if nodes is None:
         errors.append("nodes must be an array.")
         nodes = []
-
-    if not isinstance(edges, list):
+    if edges is None:
         errors.append("edges must be an array.")
         edges = []
 
     ids: set[str] = set()
-    for index, node in enumerate(nodes):
+    for i, node in enumerate(nodes):
         if not isinstance(node, dict):
-            errors.append(f"nodes[{index}] must be an object.")
+            errors.append(f"nodes[{i}] must be an object.")
             continue
-
         node_id = node.get("id")
         if not isinstance(node_id, str) or not node_id:
-            errors.append(f"nodes[{index}].id must be a non-empty string.")
+            errors.append(f"nodes[{i}].id must be a non-empty string.")
         elif node_id in ids:
             errors.append(f"Duplicate node id: {node_id}")
         else:
             ids.add(node_id)
-
-        node_data = node.get("data")
-        if not isinstance(node_data, dict):
-            errors.append(f"nodes[{index}].data must be an object.")
+        d = node.get("data")
+        if not isinstance(d, dict):
+            errors.append(f"nodes[{i}].data must be an object.")
             continue
+        if d.get("kind") not in {"asset", "zone"}:
+            errors.append(f"nodes[{i}].data.kind must be 'asset' or 'zone'.")
+        if d.get("kind") == "zone" and d.get("securityLevelTarget") not in (None, *SL_VALUES):
+            errors.append(f"nodes[{i}] has an invalid securityLevelTarget.")
+        pos = node.get("position")
+        if not isinstance(pos, dict) or not all(isinstance(pos.get(k), (int, float)) for k in ("x", "y")):
+            errors.append(f"nodes[{i}].position must have numeric x and y.")
 
-        if node_data.get("kind") not in {"asset", "zone"}:
-            errors.append(f"nodes[{index}].data.kind must be 'asset' or 'zone'.")
-
-    for index, edge in enumerate(edges):
+    for i, edge in enumerate(edges):
         if not isinstance(edge, dict):
-            errors.append(f"edges[{index}] must be an object.")
+            errors.append(f"edges[{i}] must be an object.")
             continue
-
-        source = edge.get("source")
-        target = edge.get("target")
-
-        if source not in ids:
-            errors.append(f"edges[{index}] references unknown source: {source}")
-        if target not in ids:
-            errors.append(f"edges[{index}] references unknown target: {target}")
-
+        for end in ("source", "target"):
+            if edge.get(end) not in ids:
+                errors.append(f"edges[{i}] references unknown {end}: {edge.get(end)}")
+        d = edge.get("data")
+        if version == 2:
+            if not isinstance(d, dict):
+                errors.append(f"edges[{i}].data must be an object in schema v2.")
+            elif d.get("kind") not in EDGE_KINDS:
+                errors.append(f"edges[{i}].data.kind must be 'flow' or 'link'.")
     return errors
 
 
+def _num(value: Any, fallback: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _rect(node: dict[str, Any]) -> tuple[float, float, float, float]:
+    pos = node.get("position") or {}
+    x, y = _num(pos.get("x"), 0), _num(pos.get("y"), 0)
+    if (node.get("data") or {}).get("kind") == "zone":
+        style = node.get("style") or {}
+        return x, y, _num(style.get("width"), _num(node.get("width"), ZONE_W)), _num(style.get("height"), _num(node.get("height"), ZONE_H))
+    return x, y, _num(node.get("width"), ASSET_W), _num(node.get("height"), ASSET_H)
+
+
 def assets(data: dict[str, Any]) -> list[dict[str, Any]]:
-    result = []
-    for node in data.get("nodes", []):
-        if isinstance(node, dict):
-            node_data = node.get("data")
-            if isinstance(node_data, dict) and node_data.get("kind") == "asset":
-                result.append(node_data)
-    return result
+    return [n for n in data.get("nodes", []) if isinstance(n, dict) and (n.get("data") or {}).get("kind") == "asset"]
 
 
 def zones(data: dict[str, Any]) -> list[dict[str, Any]]:
-    result = []
-    for node in data.get("nodes", []):
-        if isinstance(node, dict):
-            node_data = node.get("data")
-            if isinstance(node_data, dict) and node_data.get("kind") == "zone":
-                result.append(node_data)
+    return [n for n in data.get("nodes", []) if isinstance(n, dict) and (n.get("data") or {}).get("kind") == "zone"]
+
+
+def zone_membership(data: dict[str, Any]) -> dict[str, str | None]:
+    """Asset id -> zone title, using the same rule as the app: the smallest zone containing the asset centre."""
+    zone_rects = sorted(((z, _rect(z)) for z in zones(data)), key=lambda zr: zr[1][2] * zr[1][3])
+    result: dict[str, str | None] = {}
+    for a in assets(data):
+        x, y, w, h = _rect(a)
+        cx, cy = x + w / 2, y + h / 2
+        match = next((z for z, (zx, zy, zw, zh) in zone_rects if zx <= cx <= zx + zw and zy <= cy <= zy + zh), None)
+        result[a["id"]] = (match["data"].get("title") if match else None)
     return result
 
 
-def project_summary(data: dict[str, Any]) -> str:
-    project_assets = assets(data)
-    project_zones = zones(data)
+def edge_kind(edge: dict[str, Any]) -> str:
+    d = edge.get("data") or {}
+    return d.get("kind", "flow") if isinstance(d, dict) else "flow"
 
+
+def project_summary(data: dict[str, Any]) -> str:
+    project_assets = [a["data"] for a in assets(data)]
+    membership = zone_membership(data)
+    edges = [e for e in data.get("edges", []) if isinstance(e, dict)]
     categories = Counter(a.get("category", "Unspecified") for a in project_assets)
-    protocols = Counter(
-        protocol
-        for asset in project_assets
-        for protocol in asset.get("protocols", [])
-        if isinstance(protocol, str)
-    )
     criticality = Counter(a.get("criticality", "unspecified") for a in project_assets)
+    protocols = Counter(p for a in project_assets for p in a.get("protocols", []) if isinstance(p, str))
+    per_zone = Counter(z or "Unzoned" for z in membership.values())
 
     lines = [
         f"Project: {data.get('name', 'Unnamed')}",
         f"Schema: {data.get('schemaVersion', 'unknown')}",
         f"Assets: {len(project_assets)}",
-        f"Zones: {len(project_zones)}",
-        f"Connections: {len(data.get('edges', [])) if isinstance(data.get('edges'), list) else 0}",
+        f"Zones: {len(zones(data))}",
+        f"Flows: {sum(1 for e in edges if edge_kind(e) == 'flow')}",
+        f"Links: {sum(1 for e in edges if edge_kind(e) == 'link')}",
+        "",
+        "Assets per zone:",
+        *[f"  {name}: {count}" for name, count in per_zone.most_common()],
         "",
         "Asset categories:",
+        *[f"  {name}: {count}" for name, count in categories.most_common()],
+        "",
+        "Criticality:",
+        *[f"  {name}: {count}" for name, count in criticality.most_common()],
+        "",
+        "Protocols:",
+        *([f"  {name}: {count}" for name, count in protocols.most_common()] or ["  None recorded"]),
     ]
-
-    lines.extend(f"  {name}: {count}" for name, count in categories.most_common())
-
-    lines.append("")
-    lines.append("Criticality:")
-    lines.extend(f"  {name}: {count}" for name, count in criticality.most_common())
-
-    lines.append("")
-    lines.append("Protocols:")
-    if protocols:
-        lines.extend(f"  {name}: {count}" for name, count in protocols.most_common())
-    else:
-        lines.append("  None recorded")
-
     return "\n".join(lines)
+
+
+def _md(value: Any) -> str:
+    if value in (None, ""):
+        return "—"
+    return str(value).replace("|", "\\|").replace("\n", " ")
 
 
 def markdown_report(data: dict[str, Any]) -> str:
-    project_assets = assets(data)
-    project_zones = zones(data)
-
+    membership = zone_membership(data)
     lines = [
         f"# {data.get('name', 'OT Network Studio Project')}",
         "",
-        "Generated from an OT Network Studio project file.",
+        "Generated by the OT Network Studio Python CLI. For findings, conduits and the firewall rule matrix, use `npm run otns -- report`.",
         "",
-        "## Summary",
+        "## Zones",
         "",
-        f"- Assets: **{len(project_assets)}**",
-        f"- Zones: **{len(project_zones)}**",
-        f"- Connections: **{len(data.get('edges', [])) if isinstance(data.get('edges'), list) else 0}**",
-        "",
+        "| Zone | Type | SL-T | Subnet | VLAN | Assets |",
+        "|---|---|---|---|---|---|",
     ]
-
-    if project_zones:
-        lines.extend(["## Zones", "", "| Zone | SL-T | Type |", "|---|---|---|"])
-        for zone in project_zones:
-            lines.append(
-                f"| {zone.get('title', 'Unnamed')} | "
-                f"{zone.get('securityLevelTarget', '—')} | "
-                f"{zone.get('zoneType', '—')} |"
-            )
-        lines.append("")
-
-    lines.extend([
-        "## Asset inventory",
-        "",
-        "| Asset | Type | Category | Address | VLAN | Zone | Purdue | Criticality | Protocols |",
-        "|---|---|---|---|---|---|---|---|---|",
-    ])
-
-    for asset in project_assets:
-        protocols = ", ".join(asset.get("protocols", [])) or "—"
-        purdue = asset.get("purdueLevel")
+    for z in zones(data):
+        d = z["data"]
+        count = sum(1 for t in membership.values() if t == d.get("title"))
+        lines.append(f"| {_md(d.get('title'))} | {_md(d.get('zoneType'))} | {_md(d.get('securityLevelTarget'))} | {_md(d.get('subnet'))} | {_md(d.get('vlan'))} | {count} |")
+    lines += ["", "## Asset inventory", "", "| Asset | Type | Zone | IP | VLAN | Purdue | Criticality | Protocols |", "|---|---|---|---|---|---|---|---|"]
+    for a in assets(data):
+        d = a["data"]
+        level = d.get("purdueLevel")
         lines.append(
-            f"| {asset.get('title', 'Unnamed')} | "
-            f"{asset.get('assetType', '—')} | "
-            f"{asset.get('category', '—')} | "
-            f"{asset.get('ip', '—')} | "
-            f"{asset.get('vlan', '—')} | "
-            f"{asset.get('zone', '—')} | "
-            f"{'L' + str(purdue) if purdue is not None else '—'} | "
-            f"{asset.get('criticality', '—')} | "
-            f"{protocols} |"
+            f"| {_md(d.get('title'))} | {_md(d.get('assetType'))} | {_md(membership.get(a['id']) or 'Unzoned')} | {_md(d.get('ip'))} | "
+            f"{_md(d.get('vlan'))} | {'L' + str(level) if level is not None else '—'} | {_md(d.get('criticality'))} | {_md(', '.join(d.get('protocols', [])))} |"
         )
-
-    lines.extend([
-        "",
-        "> This report describes modelled architecture metadata only. It is not a security assessment, safety case, or compliance determination.",
-        "",
-    ])
-
+    lines += ["", "> Modelled architecture metadata only. Not a security assessment, safety case or compliance determination.", ""]
     return "\n".join(lines)
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="OT Network Studio project utility")
-    subparsers = parser.add_subparsers(dest="command", required=True)
+def inventory_csv(data: dict[str, Any]) -> str:
+    membership = zone_membership(data)
+    buf = io.StringIO()
+    writer = csv.writer(buf, lineterminator="\r\n")
+    writer.writerow(["Name", "Type", "Category", "Zone", "IP", "VLAN", "Purdue", "Criticality", "Protocols"])
+    for a in assets(data):
+        d = a["data"]
+        row = [d.get("title"), d.get("assetType"), d.get("category"), membership.get(a["id"]) or "Unzoned", d.get("ip"), d.get("vlan"),
+               d.get("purdueLevel"), d.get("criticality"), "; ".join(d.get("protocols", []))]
+        writer.writerow(["'" + str(v) if isinstance(v, str) and v[:1] in "=+-@" else ("" if v is None else v) for v in row])
+    return buf.getvalue()
 
-    validate_parser = subparsers.add_parser("validate", help="Validate a project file")
-    validate_parser.add_argument("project", type=Path)
 
-    summary_parser = subparsers.add_parser("summary", help="Print a project summary")
-    summary_parser.add_argument("project", type=Path)
-
-    report_parser = subparsers.add_parser("report", help="Generate a Markdown inventory report")
-    report_parser.add_argument("project", type=Path)
-    report_parser.add_argument("--output", "-o", type=Path)
-
-    args = parser.parse_args()
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="OT Network Studio project utility (stdlib only)")
+    sub = parser.add_subparsers(dest="command", required=True)
+    for name, help_text in [("validate", "Validate a project file"), ("summary", "Print a project summary"),
+                            ("report", "Markdown zone and inventory report"), ("inventory", "Asset inventory as CSV")]:
+        p = sub.add_parser(name, help=help_text)
+        p.add_argument("project", type=Path)
+        if name in ("report", "inventory"):
+            p.add_argument("--output", "-o", type=Path)
+    args = parser.parse_args(argv)
 
     try:
         data = load_project(args.project)
@@ -225,14 +235,13 @@ def main() -> int:
         return 2
 
     errors = validate_project(data)
-
     if args.command == "validate":
         if errors:
             print("Project validation failed:")
             for error in errors:
                 print(f"  - {error}")
             return 1
-        print("Project is valid.")
+        print(f"Project is valid (schema v{data.get('schemaVersion')}).")
         return 0
 
     if errors:
@@ -244,13 +253,12 @@ def main() -> int:
         print(project_summary(data))
         return 0
 
-    report = markdown_report(data)
+    text = markdown_report(data) if args.command == "report" else inventory_csv(data)
     if args.output:
-        args.output.write_text(report, encoding="utf-8")
+        args.output.write_text(text, encoding="utf-8", newline="")
         print(f"Wrote {args.output}")
     else:
-        print(report)
-
+        sys.stdout.write(text)
     return 0
 
 
